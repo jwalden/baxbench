@@ -23,6 +23,7 @@ pdfplumber = "*"
 imageio = "*"
 types-pyyaml = "*"
 matplotlib = "*"
+python-dotenv = "*"
 
 [requires]
 python_version = "3.12"

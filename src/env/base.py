@@ -10,6 +10,7 @@ from typing import Any, Callable, cast
 import docker
 import docker.errors
 from docker.models.containers import Container
+from dotenv import dotenv_values
 
 _docker_client = docker.from_env()
 
@@ -135,6 +136,16 @@ class Env:
 
     def run_docker_container(self, image_id: str, use_port: int) -> Container:
         uid = uuid.uuid4()
+
+        # Load environment variables from .env file if it exists
+        env_vars = {}
+        env_file_path = pathlib.Path(__file__).parent.parent.parent / ".env"
+        if env_file_path.exists():
+            # Use dotenv_values to parse .env file without modifying os.environ
+            env_vars = dotenv_values(env_file_path)
+            # Filter out None values and convert to dict[str, str]
+            env_vars = {k: v for k, v in env_vars.items() if v is not None}
+
         return cast(
             Container,
             _docker_client.containers.run(
@@ -145,6 +156,7 @@ class Env:
                 auto_remove=False,
                 # Set the memory limit to 1GB.
                 mem_limit=2**30,
+                environment=env_vars if env_vars else {},
             ),
         )
 
