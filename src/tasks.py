@@ -326,6 +326,9 @@ class Task:
                 files: dict[pathlib.Path, str] = self.load_code(
                     results_dir, sample, logger
                 )
+                wrote_env_modification, original_env_exists, original_env_text, env_file_path = prepare_environment_from_code(
+                    files, logger
+                )
                 try:
                     image_id = self.env.build_docker_image(
                         files,
@@ -366,6 +369,14 @@ class Task:
                         self.save_test_results(result, results_dir, sample)
                         logger.info("Saved test results")
                         logger.info("-" * 100)
+                        try:
+                            if wrote_env_modification:
+                                if original_env_exists:
+                                    env_file_path.write_text(original_env_text)
+                                else:
+                                    env_file_path.unlink(missing_ok=True)
+                        except Exception as restore_e:
+                            logger.warning("Failed to restore .env: %s", restore_e)
                         continue
 
                 logger.info("done building docker image. id: %s", image_id)
@@ -470,6 +481,14 @@ class Task:
                 self.save_test_results(result, results_dir, sample)
                 logger.info("saved test results")
                 logger.info("-" * 100)
+                try:
+                    if wrote_env_modification:
+                        if original_env_exists:
+                            env_file_path.write_text(original_env_text)
+                        else:
+                            env_file_path.unlink(missing_ok=True)
+                except Exception as restore_e:
+                    logger.warning("Failed to restore .env: %s", restore_e)
 
     def evaluate_results(
         self, results_dir: pathlib.Path, samples: list[int], ks: list[int]
@@ -753,3 +772,95 @@ def pass_at_k(k: int, c: int, n: int) -> float:
     if n - c < k:
         return 1.0
     return 1.0 - math.prod([1.0 - k / i for i in range(n - c + 1, n + 1)])
+
+
+def prepare_environment_from_code(
+    files: dict[pathlib.Path, str], logger: logging.Logger
+) -> tuple[bool, bool, str, pathlib.Path]:
+    """
+    Computes and writes a temporary merged .env from code usage and existing .env.
+    Priority:
+    1) Existing .env value
+    2) Default provided in code (if literal)
+    3) "TEST"
+    Returns tuple:
+      (wrote_env_modification, original_env_exists, original_env_text, env_file_path)
+    """
+    # Import here to avoid adding top-level deps
+    import re as _re
+    import ast as _ast
+
+    repo_root = pathlib.Path(__file__).parent.parent
+    env_file_path = repo_root / ".env"
+    original_env_exists = env_file_path.exists()
+    original_env_text = env_file_path.read_text() if original_env_exists else ""
+    wrote_env_modification = False
+
+    # Parse existing .env
+    existing_env: dict[str, str] = {}
+    if original_env_exists:
+        for line in original_env_text.splitlines():
+            s = line.strip()
+            if not s or s.startswith("#") or "=" not in s:
+                continue
+            k, v = s.split("=", 1)
+            existing_env[k.strip()] = v.strip()
+
+    # Patterns
+    bracket_pat = _re.compile(
+        r"os\.environ\[\s*['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]\s*\]"
+    )
+    get_pat = _re.compile(
+        r"os\.environ\.get\(\s*['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]\s*(?:,\s*([^)]+))?\)"
+    )
+    getenv_pat = _re.compile(
+        r"os\.getenv\(\s*['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]\s*(?:,\s*([^)]+))?\)"
+    )
+
+    discovered_defaults: dict[str, str | None] = {}
+    for rel_path, content in files.items():
+        if not str(rel_path).endswith(".py"):
+            continue
+        # os.environ["VAR"]
+        for var in bracket_pat.findall(content):
+            discovered_defaults.setdefault(var, None)
+        # os.environ.get("VAR", DEFAULT?)
+        for var, default_expr in get_pat.findall(content):
+            if default_expr:
+                try:
+                    val = _ast.literal_eval(default_expr.strip())
+                    discovered_defaults[var] = str(val)
+                except Exception:
+                    discovered_defaults.setdefault(var, None)
+            else:
+                discovered_defaults.setdefault(var, None)
+        # os.getenv("VAR", DEFAULT?)
+        for var, default_expr in getenv_pat.findall(content):
+            if default_expr:
+                try:
+                    val = _ast.literal_eval(default_expr.strip())
+                    discovered_defaults[var] = str(val)
+                except Exception:
+                    discovered_defaults.setdefault(var, None)
+            else:
+                discovered_defaults.setdefault(var, None)
+
+    merged_env = dict(existing_env)
+    for var, default_val in discovered_defaults.items():
+        if var in merged_env:
+            continue
+        if default_val is not None:
+            merged_env[var] = default_val
+        else:
+            merged_env[var] = "TEST"
+
+    # Write merged .env if it differs
+    def _write_env_file(env_map: dict[str, str]) -> None:
+        content = "\n".join(f"{k}={v}" for k, v in env_map.items()) + "\n" if env_map else ""
+        env_file_path.write_text(content)
+
+    if merged_env != existing_env:
+        _write_env_file(merged_env)
+        wrote_env_modification = True
+
+    return (wrote_env_modification, original_env_exists, original_env_text, env_file_path)
