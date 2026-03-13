@@ -57,15 +57,20 @@ def main(args: Any) -> None:
     else:
         ks = [1, 5]
 
+    # Handle multiple values for temperature, spec_type, and safety_prompt
+    temperatures = args.temperature if isinstance(args.temperature, list) else [args.temperature]
+    spec_types = args.spec_type if isinstance(args.spec_type, list) else [args.spec_type]
+    safety_prompts = args.safety_prompt if isinstance(args.safety_prompt, list) else [args.safety_prompt]
+
     tasks = sorted(
         [
             Task(
                 env=env,
                 scenario=scenario,
                 model=model,
-                temperature=args.temperature,
-                spec_type=args.spec_type,
-                safety_prompt=args.safety_prompt,
+                temperature=temperature,
+                spec_type=spec_type,
+                safety_prompt=safety_prompt,
                 reasoning_effort=args.reasoning_effort,
                 openrouter=args.openrouter,
                 vllm=args.vllm,
@@ -73,6 +78,9 @@ def main(args: Any) -> None:
             for env in envs
             for scenario in scenarios
             for model in args.models
+            for temperature in temperatures
+            for spec_type in spec_types
+            for safety_prompt in safety_prompts
         ],
         key=lambda t: t.id,
     )
@@ -82,6 +90,33 @@ def main(args: Any) -> None:
         results_dir=args.results_dir,
         max_concurrent_runs=args.max_concurrent_runs,
     )
+
+    # ----- Print test summary -----#
+    if args.mode == "test":
+        print("=" * 80)
+        print("TEST CONFIGURATION SUMMARY")
+        print("=" * 80)
+        print(f"Models: {', '.join(args.models)}")
+        print(f"Scenarios ({len(scenarios)}): {', '.join([s.id for s in scenarios])}")
+        print(f"Environments ({len(envs)}): {', '.join([e.id for e in envs])}")
+        print(f"Temperatures ({len(temperatures)}): {', '.join(map(str, temperatures))}")
+        print(f"Spec Types ({len(spec_types)}): {', '.join(spec_types)}")
+        print(f"Safety Prompts ({len(safety_prompts)}): {', '.join(safety_prompts)}")
+        print(f"Samples: {samples}")
+        print()
+        print(f"Total task combinations: {len(tasks)}")
+        print(f"Total tests to run: {len(tasks) * len(samples)}")
+        print(f"Max concurrent runs: {args.max_concurrent_runs if args.max_concurrent_runs else 'unlimited'}")
+        print("=" * 80)
+        print()
+
+        # Ask for confirmation unless --yes flag is provided
+        if not args.yes:
+            response = input("Do you want to proceed with testing? (y/n): ").strip().lower()
+            if response not in ['y', 'yes']:
+                print("Testing cancelled.")
+                return
+            print()
 
     # ----- Run tasks -----#
 
@@ -136,7 +171,11 @@ if __name__ == "__main__":
         help="Mode in which to run the code",
     )
     parser.add_argument(
-        "--temperature", type=float, default=0.2, help="Temperature for sampling"
+        "--temperature",
+        type=float,
+        nargs="+",
+        default=[0.2],
+        help="Temperature(s) for sampling (can specify multiple values)"
     )
     parser.add_argument(
         "--n_samples",
@@ -192,16 +231,18 @@ if __name__ == "__main__":
     parser.add_argument(
         "--spec_type",
         choices=["openapi", "text"],
-        default="openapi",
+        default=["openapi"],
         type=str,
-        help="The type of specifications to use.",
+        nargs="+",
+        help="The type(s) of specifications to use (can specify multiple values)",
     )
     parser.add_argument(
         "--safety_prompt",
         choices=["none", "generic", "specific"],
-        default="none",
+        default=["none"],
         type=str,
-        help="The type of additional safety cue to use.",
+        nargs="+",
+        help="The type(s) of additional safety cue to use (can specify multiple values)",
     )
     parser.add_argument(
         "--results_dir",
@@ -282,5 +323,10 @@ if __name__ == "__main__":
         type=int,
         default=8000,
         help="Port for VLLM server",
+    )
+    parser.add_argument(
+        "-y", "--yes",
+        action="store_true",
+        help="Skip confirmation prompt and proceed with testing automatically",
     )
     main(parser.parse_args())
