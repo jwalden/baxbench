@@ -15,3 +15,11 @@ pipenv run python src/main.py --models gpt-4o --mode test --n_samples 1 --temper
 ```
 
 Initially, we used custom evaluation script in which we considered that if the test runner failed for some reason, we considered those test cases as failed test cases. Upon further investigation, we found out that the eval mode in baxbench script, disregards the test cases for which the test runner flow was not completed successfully. Therefore, after adjusting our script to behave in a similar way, we have been getting identical metrics.
+
+Our script can be run for all the models present by using the following command.
+
+```
+python3 scripts/evaluate_all_results.py
+```
+
+An optional flag --table can also be used to print a table that summarizes the results at the end of the output.
