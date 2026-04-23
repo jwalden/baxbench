@@ -118,11 +118,15 @@ class Task:
 
     @contextmanager
     def create_logger(
-        self, logfile_path: pathlib.Path
+        self,
+        logfile_path: pathlib.Path,
+        append: bool = False,
     ) -> Generator[logging.Logger, None, None]:
         logger = logging.getLogger(self.id)
         logger.setLevel(logging.INFO)
-        logfile_handler = logging.FileHandler(logfile_path, mode="w")
+        logfile_handler = logging.FileHandler(
+            logfile_path, mode="a" if append else "w"
+        )
         logfile_handler.setLevel(logging.INFO)
         logfile_handler.setFormatter(
             logging.Formatter(fmt="%(levelname)s %(asctime)s %(message)s")
@@ -213,7 +217,73 @@ class Task:
         openrouter: bool,
         vllm: bool,
         vllm_port: int,
+        revision_prompt_path: pathlib.Path | None = None,
+        only_samples: list[int] | None = None,
     ) -> None:
+        if only_samples is not None:
+            if revision_prompt_path is not None and not revision_prompt_path.is_file():
+                raise FileNotFoundError(
+                    f"revision_prompt_path does not exist: {revision_prompt_path}"
+                )
+            save_dir = self.get_save_dir(results_dir)
+            save_dir.mkdir(parents=True, exist_ok=True)
+            gen_logfile_path = save_dir / "gen.log"
+            append_log = gen_logfile_path.exists()
+            with self.create_logger(gen_logfile_path, append=append_log) as logger:
+                logger.info("Prior Log:\n%s", "")
+                logger.info(100 * "-")
+                logger.info(
+                    "only_samples regeneration for task %s samples=%s revision_prompt=%s",
+                    self.id,
+                    sorted(only_samples),
+                    revision_prompt_path,
+                )
+                for sample in sorted(only_samples):
+                    sample_dir = self.get_sample_dir(results_dir, sample)
+                    if sample_dir.exists():
+                        shutil.rmtree(sample_dir)
+                    prompter = Prompter(
+                        env=self.env,
+                        scenario=self.scenario,
+                        model=self.model,
+                        spec_type=self.spec_type,
+                        safety_prompt=self.safety_prompt,
+                        batch_size=1,
+                        offset=sample,
+                        temperature=self.temperature,
+                        reasoning_effort=self.reasoning_effort,
+                        openrouter=openrouter,
+                        vllm=vllm,
+                        vllm_port=vllm_port,
+                        revision_prompt_path=revision_prompt_path,
+                    )
+                    if revision_prompt_path is not None:
+                        logger.info(
+                            "prompt for sample %d from %s (%d chars)",
+                            sample,
+                            revision_prompt_path,
+                            len(prompter.prompt),
+                        )
+                    else:
+                        logger.info(
+                            "built prompt for sample %d:\n%s", sample, prompter.prompt
+                        )
+                    logger.info("-" * 100)
+                    try:
+                        prompter.prompt_model_batch_with_exp_backoff(
+                            max_retries=max_retries,
+                            base_delay=base_delay,
+                            max_delay=max_delay,
+                            save_dir=self.get_save_dir(results_dir),
+                            logger=logger,
+                        )
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception as e:
+                        logger.exception("got exception:\n%s", str(e), exc_info=e)
+                        return
+            return
+
         # check if there are already some results generated
         last_sample = -1
         for sample in range(batch_size):
@@ -276,6 +346,7 @@ class Task:
                 openrouter=openrouter,
                 vllm=vllm,
                 vllm_port=vllm_port,
+                revision_prompt_path=revision_prompt_path,
             )
             logger.info("built prompt:\n%s", prompter.prompt)
             logger.info("-" * 100)
@@ -691,6 +762,8 @@ class TaskHandler:
         openrouter: bool,
         vllm: bool,
         vllm_port: int,
+        revision_prompt_path: pathlib.Path | None = None,
+        only_samples: list[int] | None = None,
     ) -> list[int]:
         with tqdm.tqdm(total=len(self.tasks)) as pbar:
             pbar.get_lock()  # type: ignore[no-untyped-call]
@@ -707,6 +780,8 @@ class TaskHandler:
                     skip_failed=skip_failed,
                     vllm=vllm,
                     vllm_port=vllm_port,
+                    revision_prompt_path=revision_prompt_path,
+                    only_samples=only_samples,
                 )
                 with pbar.get_lock():  # type: ignore[no-untyped-call]
                     pbar.update(1)

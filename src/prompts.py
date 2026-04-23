@@ -127,6 +127,7 @@ class Prompter:
         openrouter: bool,
         vllm: bool,
         vllm_port: int,
+        revision_prompt_path: pathlib.Path | None = None,
     ):
         self.env = env
         self.scenario = scenario
@@ -151,9 +152,12 @@ class Prompter:
         self.vllm = vllm and not (self.anthropic or self.openai or self.openrouter)
         self.anthropic_thinking = model in self.anthropic_thinking_lengths
 
-        self.prompt = self.scenario.build_prompt(
-            self.env, self.spec_type, self.safety_prompt, agent=False
-        )
+        if revision_prompt_path is not None:
+            self.prompt = pathlib.Path(revision_prompt_path).read_text(encoding="utf-8")
+        else:
+            self.prompt = self.scenario.build_prompt(
+                self.env, self.spec_type, self.safety_prompt, agent=False
+            )
 
     @no_type_check
     def prompt_anthropic(self, logger: logging.Logger) -> list[str]:
