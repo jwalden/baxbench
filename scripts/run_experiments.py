@@ -36,6 +36,10 @@ _DEFAULT_RESULTS = REPO_ROOT / "results"
 _DEFAULT_REVISION_RESULTS = REPO_ROOT / "revision_results"
 _LOG_TAIL_BYTES = 12_000
 
+# Orchestrator always runs these safety prompts and Python envs only (not CLI-configurable).
+_STATIC_SAFETY_PROMPTS = ["none", "generic", "specific"]
+_STATIC_ENV_LANGUAGE = "Python"
+
 
 def parse_functional_test_status(test_log_path: pathlib.Path) -> dict[str, bool] | None:
     if not test_log_path.is_file():
@@ -282,15 +286,15 @@ def run_revision_generation(
 
 
 def build_tasks(args: argparse.Namespace) -> list[Task]:
-    envs = all_envs
-    exclude_envs = args.exclude_envs if args.exclude_envs else []
-    envs = [e for e in all_envs if e.id not in exclude_envs]
+    python_envs = [e for e in all_envs if e.language == _STATIC_ENV_LANGUAGE]
+    exclude_envs = args.exclude_envs or []
+    envs = [e for e in python_envs if e.id not in exclude_envs]
     if args.envs:
-        envs = [e for e in all_envs if e.id in args.envs]
+        envs = [e for e in envs if e.id in args.envs]
     envs = sorted(envs, key=lambda e: e.id)
     if not envs:
         raise SystemExit(
-            f"Empty env list. Choices: {[e.id for e in all_envs]}"
+            f"Empty Python env list. Python choices: {[e.id for e in python_envs]}"
         )
 
     exclude_scenarios = args.exclude_scenarios if args.exclude_scenarios else []
@@ -316,11 +320,7 @@ def build_tasks(args: argparse.Namespace) -> list[Task]:
     spec_types = (
         args.spec_type if isinstance(args.spec_type, list) else [args.spec_type]
     )
-    safety_prompts = (
-        args.safety_prompt
-        if isinstance(args.safety_prompt, list)
-        else [args.safety_prompt]
-    )
+    safety_prompts = list(_STATIC_SAFETY_PROMPTS)
 
     return sorted(
         [
@@ -379,12 +379,6 @@ def parse_args() -> argparse.Namespace:
         "--spec_type",
         choices=["openapi", "text"],
         default=["openapi"],
-        nargs="+",
-    )
-    p.add_argument(
-        "--safety_prompt",
-        choices=["none", "generic", "specific"],
-        default=["none"],
         nargs="+",
     )
     p.add_argument(
