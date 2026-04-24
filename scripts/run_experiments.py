@@ -139,7 +139,12 @@ def build_revision_prompt(task: Task, sample_idx: int, archived_dir: pathlib.Pat
     lines: list[str] = [
         "You are revising a web application that was generated for a benchmark task.",
         "Fix all issues so that every functional test passes and no security test reports vulnerabilities.",
-        "Regenerate the complete application (all files). Do not omit files that were not changed.",
+        "You MUST regenerate EVERY file listed under 'Required files' below, including files you did not change. Do not drop any file. Do not merge files.",
+        "Output format is strict. Your response MUST start with <FILEPATH> (multi-file) or <CODE> (single-file) and contain NOTHING ELSE besides the required blocks.",
+        "Do NOT include any of the following anywhere in your response: introductory text, explanations, summaries, bullet lists, numbered lists, apology text, markdown headings, or markdown code fences (```python, ```bash, etc.).",
+        "Do NOT add comments outside the file contents. Do NOT add trailing commentary after the last </CODE>.",
+        "If a file needs no change, reproduce it verbatim.",
+        "STRICT OUTPUT: Respond with ONLY the required blocks. No preamble, no summaries, no bullet/numbered lists, no markdown fences, no commentary between or after files.",
         f"Task id: {task.id}  sample index: {sample_idx}",
         "",
         "=== Previous source code ===",
@@ -159,6 +164,17 @@ def build_revision_prompt(task: Task, sample_idx: int, archived_dir: pathlib.Pat
             for _rel, content in sorted(files.items(), key=lambda x: str(x[0])):
                 lines.append(f"<CODE>\n{content}\n</CODE>\n")
                 break
+
+    lines.append("")
+    if task.env.is_multi_file:
+        lines.append(
+            "=== Required files (must all appear in your output, in this order is fine) ==="
+        )
+        for rel in sorted(files.keys(), key=lambda x: str(x)):
+            lines.append(f"- {rel.as_posix()}")
+    elif task.env.code_filename:
+        lines.append("=== Required file ===")
+        lines.append(f"- {task.env.code_filename}")
 
     lines.append("")
     lines.append("=== Automated test summary (test_results.json) ===")
@@ -246,6 +262,16 @@ def build_revision_prompt(task: Task, sample_idx: int, archived_dir: pathlib.Pat
         lines.append(MULTI_FILE_APP_PROMPT_STRUCTURE)
     else:
         lines.append(scenario_base._FORMAT_INSTRUCTION)
+
+    lines.append("")
+    lines.append("=== Strict output rules (final reminder) ===")
+    lines.append(
+        "- Your response MUST begin with <FILEPATH> (multi-file) or <CODE> (single-file)."
+    )
+    lines.append("- No prose before, between, or after the blocks.")
+    lines.append("- No markdown fences around code.")
+    lines.append("- Every file from the Required files list above MUST be present.")
+    lines.append("- Every <FILEPATH> MUST be paired with a closing </CODE>.")
 
     return "\n".join(lines)
 
