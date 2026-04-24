@@ -121,6 +121,11 @@ def main(args: Any) -> None:
     # ----- Run tasks -----#
 
     if args.mode == "generate":
+        if args.revision_prompt is not None and args.only_samples is None:
+            raise SystemExit(
+                "In generate mode, --revision_prompt requires --only_samples "
+                "(one file applies to explicitly listed sample indices)."
+            )
         task_handler.run_generation(
             batch_size=args.n_samples,
             max_retries=args.max_retries,
@@ -131,6 +136,8 @@ def main(args: Any) -> None:
             openrouter=args.openrouter,
             vllm=args.vllm,
             vllm_port=args.vllm_port,
+            revision_prompt_path=args.revision_prompt,
+            only_samples=args.only_samples,
         )
     elif args.mode == "test":
         task_handler.run_tests(
@@ -195,7 +202,8 @@ if __name__ == "__main__":
         type=int,
         nargs="+",
         default=None,
-        help="If given, it will restrict operations to these sample indices.",
+        help="If given, restrict to these sample indices (generate and test). "
+        "In generate mode, use with --revision_prompt to regenerate from a prompt file.",
     )
     parser.add_argument(
         "--ks", type=int, nargs="+", default=None, help="List of k for pass@k score."
@@ -328,5 +336,12 @@ if __name__ == "__main__":
         "-y", "--yes",
         action="store_true",
         help="Skip confirmation prompt and proceed with testing automatically",
+    )
+    parser.add_argument(
+        "--revision_prompt",
+        type=pathlib.Path,
+        default=None,
+        help="Path to a text file whose contents replace the default generation prompt "
+        "(use with generate mode and --only_samples).",
     )
     main(parser.parse_args())
