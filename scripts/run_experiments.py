@@ -13,12 +13,16 @@ import argparse
 import concurrent.futures
 import inspect
 import json
+import logging
 import os
 import pathlib
 import re
 import shutil
 import sys
+import traceback
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 SRC_DIR = REPO_ROOT / "src"
@@ -111,10 +115,11 @@ def archive_sample(
     revision_n: int,
     results_dir: pathlib.Path,
     revision_results_dir: pathlib.Path,
-) -> pathlib.Path:
+) -> pathlib.Path | None:
     src = task.get_sample_dir(results_dir, sample_idx)
     if not src.exists():
-        raise FileNotFoundError(f"Cannot archive missing sample directory: {src}")
+        logger.warning("Cannot archive missing sample directory: %s", src)
+        return None
     rel = src.relative_to(results_dir)
     dest = revision_results_dir / f"revision_{revision_n}" / rel
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -287,28 +292,59 @@ def run_revision_generation(
     openrouter: bool,
     vllm: bool,
     vllm_port: int,
-) -> None:
-    def one(spec: tuple[Task, int, pathlib.Path]) -> None:
+) -> dict[str, int]:
+    attempted = len(regen_specs)
+    ok = 0
+    errored = 0
+
+    def one(spec: tuple[Task, int, pathlib.Path]) -> bool:
         task, sample_idx, prompt_path = spec
-        task.generate_code(
-            results_dir=results_dir,
-            batch_size=batch_size,
-            max_retries=max_retries,
-            base_delay=base_delay,
-            max_delay=max_delay,
-            force=True,
-            skip_failed=False,
-            openrouter=openrouter,
-            vllm=vllm,
-            vllm_port=vllm_port,
-            revision_prompt_path=prompt_path,
-            only_samples=[sample_idx],
-        )
+        try:
+            task.generate_code(
+                results_dir=results_dir,
+                batch_size=batch_size,
+                max_retries=max_retries,
+                base_delay=base_delay,
+                max_delay=max_delay,
+                force=True,
+                skip_failed=False,
+                openrouter=openrouter,
+                vllm=vllm,
+                vllm_port=vllm_port,
+                revision_prompt_path=prompt_path,
+                only_samples=[sample_idx],
+            )
+            return True
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            print(
+                f"Revision generation failed: task={task.id} sample={sample_idx}\n"
+                f"{traceback.format_exc()}",
+                file=sys.stderr,
+            )
+            return False
+
+    if not regen_specs:
+        return {"attempted": 0, "ok": 0, "errored": 0}
 
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=max_concurrent_runs
     ) as executor:
-        list(executor.map(one, regen_specs))
+        futures = [executor.submit(one, spec) for spec in regen_specs]
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                if fut.result():
+                    ok += 1
+                else:
+                    errored += 1
+            except KeyboardInterrupt:
+                raise
+            except Exception:
+                print(traceback.format_exc(), file=sys.stderr)
+                errored += 1
+
+    return {"attempted": attempted, "ok": ok, "errored": errored}
 
 
 def build_tasks(args: argparse.Namespace) -> list[Task]:
@@ -506,11 +542,29 @@ def main() -> None:
             force=args.test_force,
         )
 
+    pairs_ever_failing: set[tuple[str, int]] = set()
+    pairs_skipped_missing: set[tuple[str, int]] = set()
+    total_regen_attempted = 0
+    total_regen_ok = 0
+    total_regen_errored = 0
+    total_prompt_build_failed = 0
+
     revision_n = 0
     while revision_n < args.max_revisions:
         failures = collect_failures(tasks, samples, args.results_dir)
+        for task, s in failures:
+            pairs_ever_failing.add((task.id, s))
         if not failures:
             print(f"All {len(tasks)} tasks x {len(samples)} samples passed criteria.")
+            print(
+                "Run summary: "
+                f"pairs_ever_failing={len(pairs_ever_failing)} "
+                f"pairs_skipped_missing_archive={len(pairs_skipped_missing)} "
+                f"revision_regen_attempted={total_regen_attempted} "
+                f"revision_regen_ok={total_regen_ok} "
+                f"revision_regen_errored={total_regen_errored} "
+                f"prompt_build_failed={total_prompt_build_failed}"
+            )
             return
         revision_n += 1
         print(
@@ -518,22 +572,39 @@ def main() -> None:
             f"{len(failures)} failing (task, sample) pairs"
         )
         regen_specs: list[tuple[Task, int, pathlib.Path]] = []
+        skipped_missing_round = 0
+        prompt_failed_round = 0
         for task, sample_idx in failures:
-            archived = archive_sample(
-                task,
-                sample_idx,
-                revision_n,
-                args.results_dir,
-                args.revision_results_dir,
-            )
-            prompt_path = archived / "revision_prompt.txt"
-            prompt_path.write_text(
-                build_revision_prompt(task, sample_idx, archived),
-                encoding="utf-8",
-            )
-            regen_specs.append((task, sample_idx, prompt_path))
+            try:
+                archived = archive_sample(
+                    task,
+                    sample_idx,
+                    revision_n,
+                    args.results_dir,
+                    args.revision_results_dir,
+                )
+                if archived is None:
+                    pairs_skipped_missing.add((task.id, sample_idx))
+                    skipped_missing_round += 1
+                    continue
+                prompt_path = archived / "revision_prompt.txt"
+                prompt_path.write_text(
+                    build_revision_prompt(task, sample_idx, archived),
+                    encoding="utf-8",
+                )
+                regen_specs.append((task, sample_idx, prompt_path))
+            except KeyboardInterrupt:
+                raise
+            except Exception:
+                total_prompt_build_failed += 1
+                prompt_failed_round += 1
+                print(
+                    f"Archive/prompt build failed: task={task.id} "
+                    f"sample={sample_idx}\n{traceback.format_exc()}",
+                    file=sys.stderr,
+                )
 
-        run_revision_generation(
+        regen_counts = run_revision_generation(
             regen_specs,
             args.results_dir,
             args.max_concurrent_runs,
@@ -545,6 +616,18 @@ def main() -> None:
             vllm=args.vllm,
             vllm_port=args.vllm_port,
         )
+        total_regen_attempted += regen_counts["attempted"]
+        total_regen_ok += regen_counts["ok"]
+        total_regen_errored += regen_counts["errored"]
+
+        print(
+            f"Revision {revision_n} stats: "
+            f"regen attempted={regen_counts['attempted']} "
+            f"ok={regen_counts['ok']} "
+            f"errored={regen_counts['errored']} "
+            f"skipped_missing={skipped_missing_round} "
+            f"prompt_build_failed={prompt_failed_round}"
+        )
 
         task_handler.run_tests(
             samples=samples,
@@ -554,9 +637,20 @@ def main() -> None:
             force=args.test_force,
         )
 
+    still_failing = collect_failures(tasks, samples, args.results_dir)
     print(
         f"Stopped after {args.max_revisions} revision rounds; "
         "some samples may still fail."
+    )
+    print(
+        "Final summary: "
+        f"pairs_still_failing={len(still_failing)} "
+        f"pairs_ever_failing={len(pairs_ever_failing)} "
+        f"pairs_skipped_missing_archive={len(pairs_skipped_missing)} "
+        f"revision_regen_attempted={total_regen_attempted} "
+        f"revision_regen_ok={total_regen_ok} "
+        f"revision_regen_errored={total_regen_errored} "
+        f"prompt_build_failed={total_prompt_build_failed}"
     )
 
 

@@ -21,12 +21,9 @@ def load_test_results(model_dir: Path) -> List[Dict]:
 
     for test_file in model_dir.rglob("test_results.json"):
         try:
-            with open(test_file, 'r') as f:
+            with open(test_file, "r") as f:
                 data = json.load(f)
-                test_results.append({
-                    'path': test_file,
-                    'data': data
-                })
+                test_results.append({"path": test_file, "data": data})
         except (json.JSONDecodeError, IOError) as e:
             print(f"Warning: Failed to load {test_file}: {e}")
 
@@ -44,12 +41,12 @@ def compute_metrics(test_results: List[Dict]) -> Tuple[int, int]:
     sec_pass_at_1_sum = 0
 
     for result in test_results:
-        data = result['data']
+        data = result["data"]
 
         # Extract required fields
-        num_passed_ft = data.get('num_passed_ft', 0)
-        num_total_ft = data.get('num_total_ft', 0)
-        cwes = data.get('cwes', [])
+        num_passed_ft = data.get("num_passed_ft", 0)
+        num_total_ft = data.get("num_total_ft", 0)
+        cwes = data.get("cwes", [])
 
         # Compute pass@1
         pass_at_1 = 1 if num_passed_ft == num_total_ft else 0
@@ -66,12 +63,10 @@ def compute_metrics(test_results: List[Dict]) -> Tuple[int, int]:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Compute pass@1 and sec-pass@1 metrics for a model directory'
+        description="Compute pass@1 and sec-pass@1 metrics for a model directory"
     )
     parser.add_argument(
-        'model_dir',
-        type=str,
-        help='Path to model directory (e.g., results/gpt-4.1)'
+        "model_dir", type=str, help="Path to model directory (e.g., results/gpt-4.1)"
     )
 
     args = parser.parse_args()
@@ -108,26 +103,32 @@ def main():
     print("RESULTS")
     print("=" * 50)
     print(f"Evaluated experiments (existing test_results.json): {total_evaluated}")
-    if args.expected_total is not None:
-        if args.expected_total <= 0:
-            print("Coverage: invalid expected total (must be > 0)")
-        else:
-            coverage_percent = (total_evaluated / args.expected_total) * 100
-            print(
-                f"Coverage: {total_evaluated}/{args.expected_total} "
-                f"({coverage_percent:.2f}%)"
-            )
+
+    # if not args.expected_total:
+    #     args.expected_total = 336
+    #
+    # if args.expected_total is not None:
+    #     if args.expected_total <= 0:
+    #         print("Coverage: invalid expected total (must be > 0)")
+    #     else:
+    #         coverage_percent = (total_evaluated / args.expected_total) * 100
+    #         print(
+    #             f"Coverage: {total_evaluated}/{args.expected_total} "
+    #             f"({coverage_percent:.2f}%)"
+    #         )
     print(f"pass@1:")
     print(f"  Sum:     {pass_at_1_sum}")
     print(f"  Percent: {pass_at_1_percent:.2f}% ({pass_at_1_sum}/{total_evaluated})")
     print()
     print(f"sec-pass@1:")
     print(f"  Sum:     {sec_pass_at_1_sum}")
-    print(f"  Percent: {sec_pass_at_1_percent:.2f}% ({sec_pass_at_1_sum}/{total_evaluated})")
+    print(
+        f"  Percent: {sec_pass_at_1_percent:.2f}% ({sec_pass_at_1_sum}/{total_evaluated})"
+    )
     print("=" * 50)
 
     return 0
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     exit(main())

@@ -7,6 +7,8 @@ import multiprocessing
 import multiprocessing.managers
 import os
 import pathlib
+import sys
+import traceback
 import shutil
 import time
 from contextlib import contextmanager
@@ -769,28 +771,49 @@ class TaskHandler:
             pbar.get_lock()  # type: ignore[no-untyped-call]
 
             def run_gen_task(task: Task) -> int:
-                task.generate_code(
-                    results_dir=self.results_dir,
-                    batch_size=batch_size,
-                    force=force,
-                    max_retries=max_retries,
-                    base_delay=base_delay,
-                    max_delay=max_delay,
-                    openrouter=openrouter,
-                    skip_failed=skip_failed,
-                    vllm=vllm,
-                    vllm_port=vllm_port,
-                    revision_prompt_path=revision_prompt_path,
-                    only_samples=only_samples,
-                )
-                with pbar.get_lock():  # type: ignore[no-untyped-call]
-                    pbar.update(1)
-                return 1
+                try:
+                    task.generate_code(
+                        results_dir=self.results_dir,
+                        batch_size=batch_size,
+                        force=force,
+                        max_retries=max_retries,
+                        base_delay=base_delay,
+                        max_delay=max_delay,
+                        openrouter=openrouter,
+                        skip_failed=skip_failed,
+                        vllm=vllm,
+                        vllm_port=vllm_port,
+                        revision_prompt_path=revision_prompt_path,
+                        only_samples=only_samples,
+                    )
+                    return 1
+                except KeyboardInterrupt:
+                    raise
+                except Exception:
+                    print(
+                        f"Task generation failed: {task.id}\n"
+                        f"{traceback.format_exc()}",
+                        file=sys.stderr,
+                    )
+                    return 0
+                finally:
+                    with pbar.get_lock():  # type: ignore[no-untyped-call]
+                        pbar.update(1)
 
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=self.max_concurrent_runs
             ) as executor:
-                return list(executor.map(run_gen_task, self.tasks))
+                futures = [executor.submit(run_gen_task, t) for t in self.tasks]
+                out: list[int] = []
+                for fut in concurrent.futures.as_completed(futures):
+                    try:
+                        out.append(fut.result())
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception:
+                        print(traceback.format_exc(), file=sys.stderr)
+                        out.append(0)
+                return out
 
     def run_tests(
         self,
@@ -807,21 +830,45 @@ class TaskHandler:
 
                 def run_test_task(index_and_task: tuple[int, Task]) -> int:
                     i, task = index_and_task
-                    task.test_code(
-                        results_dir=self.results_dir,
-                        samples=samples,
-                        port_manager=port_manager,
-                        timeout=timeout,
-                        force=force,
-                    )
-                    with pbar.get_lock():  # type: ignore[no-untyped-call]
-                        pbar.update(1)
-                    return 1
+                    try:
+                        task.test_code(
+                            results_dir=self.results_dir,
+                            samples=samples,
+                            port_manager=port_manager,
+                            timeout=timeout,
+                            force=force,
+                        )
+                        return 1
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception:
+                        print(
+                            f"Task test failed: {task.id}\n"
+                            f"{traceback.format_exc()}",
+                            file=sys.stderr,
+                        )
+                        return 0
+                    finally:
+                        with pbar.get_lock():  # type: ignore[no-untyped-call]
+                            pbar.update(1)
 
                 with concurrent.futures.ThreadPoolExecutor(
                     max_workers=self.max_concurrent_runs
                 ) as executor:
-                    return list(executor.map(run_test_task, enumerate(self.tasks)))
+                    futures = [
+                        executor.submit(run_test_task, x)
+                        for x in enumerate(self.tasks)
+                    ]
+                    out: list[int] = []
+                    for fut in concurrent.futures.as_completed(futures):
+                        try:
+                            out.append(fut.result())
+                        except KeyboardInterrupt:
+                            raise
+                        except Exception:
+                            print(traceback.format_exc(), file=sys.stderr)
+                            out.append(0)
+                    return out
 
     def evaluate_results(
         self, samples: list[int], ks: list[int]
@@ -830,17 +877,45 @@ class TaskHandler:
             pbar.get_lock()  # type: ignore[no-untyped-call]
 
             def evaluate_results_task(task: Task) -> tuple[Task, SampleTestResult]:
-                rs = task.evaluate_results(
-                    results_dir=self.results_dir, samples=samples, ks=ks
-                )
-                with pbar.get_lock():  # type: ignore[no-untyped-call]
-                    pbar.update(1)
-                return (task, rs)
+                try:
+                    rs = task.evaluate_results(
+                        results_dir=self.results_dir, samples=samples, ks=ks
+                    )
+                    return (task, rs)
+                except KeyboardInterrupt:
+                    raise
+                except Exception:
+                    print(
+                        f"Task evaluate_results failed: {task.id}\n"
+                        f"{traceback.format_exc()}",
+                        file=sys.stderr,
+                    )
+                    rs = SampleTestResult()
+                    rs.calculate_metrics(ks=ks)
+                    return (task, rs)
+                finally:
+                    with pbar.get_lock():  # type: ignore[no-untyped-call]
+                        pbar.update(1)
 
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=self.max_concurrent_runs
             ) as executor:
-                return list(executor.map(evaluate_results_task, self.tasks))
+                future_to_task = {
+                    executor.submit(evaluate_results_task, t): t for t in self.tasks
+                }
+                out: list[tuple[Task, SampleTestResult]] = []
+                for fut in concurrent.futures.as_completed(future_to_task):
+                    task = future_to_task[fut]
+                    try:
+                        out.append(fut.result())
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception:
+                        print(traceback.format_exc(), file=sys.stderr)
+                        rs = SampleTestResult()
+                        rs.calculate_metrics(ks=ks)
+                        out.append((task, rs))
+                return out
             
 
 def pass_at_k(k: int, c: int, n: int) -> float:
