@@ -22,7 +22,99 @@ import sys
 import traceback
 from typing import Any
 
+import docker
+import docker.errors
+
 logger = logging.getLogger(__name__)
+
+
+def cleanup_baxbench_docker_images(revision_label: str) -> None:
+    """Remove every baxbench-built docker image and prune dangling layers / build cache.
+
+    Called after each revision's test phase to keep `/var/lib/docker` and the
+    containerd snapshot store from growing without bound on long benchmark runs.
+
+    What gets removed:
+      * Every image tagged `baxbench_*` (the current per-framework image).
+      * Every dangling image carrying a `framework` label (orphaned by a later
+        same-tag rebuild within the revision).
+      * Dangling images and unused build cache.
+
+    What is preserved:
+      * Base FROM images (e.g. `nikolaik/python-nodejs:...`, `python:...`).
+        Removing a derived image with `force=True, noprune=False` only reclaims
+        layers that no surviving image still references, so the base layers
+        remain cached and the next revision's first build does not re-pull them.
+    """
+    try:
+        client = docker.from_env()
+    except docker.errors.DockerException as e:
+        print(
+            f"[{revision_label}] docker client init failed during cleanup: {e}",
+            file=sys.stderr,
+        )
+        return
+
+    removed = 0
+    failed = 0
+
+    candidates: dict[str, Any] = {}
+    try:
+        for img in client.images.list():
+            tags = img.tags or []
+            labels = (img.attrs.get("Config") or {}).get("Labels") or {}
+            is_baxbench_tagged = any(t.startswith("baxbench_") for t in tags)
+            is_dangling_baxbench = (not tags) and ("framework" in labels)
+            if is_baxbench_tagged or is_dangling_baxbench:
+                candidates[img.id] = img
+    except docker.errors.APIError as e:
+        print(
+            f"[{revision_label}] docker images.list failed during cleanup: {e}",
+            file=sys.stderr,
+        )
+
+    for image_id, img in candidates.items():
+        try:
+            client.images.remove(image=image_id, force=True, noprune=False)
+            removed += 1
+        except docker.errors.ImageNotFound:
+            pass
+        except docker.errors.APIError as e:
+            failed += 1
+            print(
+                f"[{revision_label}] failed to remove image {image_id} "
+                f"(tags={img.tags}): {e}",
+                file=sys.stderr,
+            )
+
+    dangling_reclaimed = 0
+    try:
+        r = client.images.prune(filters={"dangling": True})
+        dangling_reclaimed = int(r.get("SpaceReclaimed") or 0)
+    except docker.errors.APIError as e:
+        print(
+            f"[{revision_label}] images.prune failed during cleanup: {e}",
+            file=sys.stderr,
+        )
+
+    builder_reclaimed = 0
+    try:
+        # prune_builds() is available on the low-level API client; not all
+        # daemon versions support it, so failures here are non-fatal.
+        r = client.api.prune_builds()
+        builder_reclaimed = int(r.get("SpaceReclaimed") or 0)
+    except (docker.errors.APIError, AttributeError) as e:
+        print(
+            f"[{revision_label}] builder cache prune skipped/failed: {e}",
+            file=sys.stderr,
+        )
+
+    print(
+        f"[{revision_label}] docker cleanup: removed_images={removed} "
+        f"failed_removals={failed} "
+        f"dangling_bytes_reclaimed={dangling_reclaimed} "
+        f"builder_bytes_reclaimed={builder_reclaimed}"
+    )
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 SRC_DIR = REPO_ROOT / "src"
@@ -541,6 +633,7 @@ def main() -> None:
             min_port=args.min_port,
             force=args.test_force,
         )
+        cleanup_baxbench_docker_images("initial")
 
     pairs_ever_failing: set[tuple[str, int]] = set()
     pairs_skipped_missing: set[tuple[str, int]] = set()
@@ -636,6 +729,7 @@ def main() -> None:
             min_port=args.min_port,
             force=args.test_force,
         )
+        cleanup_baxbench_docker_images(f"revision_{revision_n}")
 
     still_failing = collect_failures(tasks, samples, args.results_dir)
     print(
