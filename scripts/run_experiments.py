@@ -18,103 +18,37 @@ import os
 import pathlib
 import re
 import shutil
+import subprocess
 import sys
 import traceback
 from typing import Any
-
-import docker
-import docker.errors
 
 logger = logging.getLogger(__name__)
 
 
 def cleanup_baxbench_docker_images(revision_label: str) -> None:
-    """Remove every baxbench-built docker image and prune dangling layers / build cache.
+    """Remove all unused docker images and build cache after a revision's tests.
 
-    Called after each revision's test phase to keep `/var/lib/docker` and the
-    containerd snapshot store from growing without bound on long benchmark runs.
-
-    What gets removed:
-      * Every image tagged `baxbench_*` (the current per-framework image).
-      * Every dangling image carrying a `framework` label (orphaned by a later
-        same-tag rebuild within the revision).
-      * Dangling images and unused build cache.
-
-    What is preserved:
-      * Base FROM images (e.g. `nikolaik/python-nodejs:...`, `python:...`).
-        Removing a derived image with `force=True, noprune=False` only reclaims
-        layers that no surviving image still references, so the base layers
-        remain cached and the next revision's first build does not re-pull them.
+    Shells out to `docker system prune -af` and `docker builder prune -af`,
+    which together delete every image that no running container still references
+    (baxbench images, dangling layers, and base FROM images) plus the BuildKit /
+    legacy builder cache. The next revision will re-pull base images on demand;
+    on benchmark runs that take hours per revision the extra pull time is
+    negligible compared to the disk-safety win.
     """
-    try:
-        client = docker.from_env()
-    except docker.errors.DockerException as e:
-        print(
-            f"[{revision_label}] docker client init failed during cleanup: {e}",
-            file=sys.stderr,
-        )
-        return
-
-    removed = 0
-    failed = 0
-
-    candidates: dict[str, Any] = {}
-    try:
-        for img in client.images.list():
-            tags = img.tags or []
-            labels = (img.attrs.get("Config") or {}).get("Labels") or {}
-            is_baxbench_tagged = any(t.startswith("baxbench_") for t in tags)
-            is_dangling_baxbench = (not tags) and ("framework" in labels)
-            if is_baxbench_tagged or is_dangling_baxbench:
-                candidates[img.id] = img
-    except docker.errors.APIError as e:
-        print(
-            f"[{revision_label}] docker images.list failed during cleanup: {e}",
-            file=sys.stderr,
-        )
-
-    for image_id, img in candidates.items():
+    for argv in (
+        ["docker", "system", "prune", "-af", "--volumes"],
+        ["docker", "builder", "prune", "-af"],
+    ):
         try:
-            client.images.remove(image=image_id, force=True, noprune=False)
-            removed += 1
-        except docker.errors.ImageNotFound:
-            pass
-        except docker.errors.APIError as e:
-            failed += 1
+            r = subprocess.run(argv, capture_output=True, text=True, timeout=300)
+            tail = (r.stdout or r.stderr or "").strip().splitlines()[-1:] or [""]
+            print(f"[{revision_label}] {' '.join(argv)} -> rc={r.returncode} {tail[0]}")
+        except (subprocess.SubprocessError, FileNotFoundError) as e:
             print(
-                f"[{revision_label}] failed to remove image {image_id} "
-                f"(tags={img.tags}): {e}",
+                f"[{revision_label}] {' '.join(argv)} failed: {e}",
                 file=sys.stderr,
             )
-
-    dangling_reclaimed = 0
-    try:
-        r = client.images.prune(filters={"dangling": True})
-        dangling_reclaimed = int(r.get("SpaceReclaimed") or 0)
-    except docker.errors.APIError as e:
-        print(
-            f"[{revision_label}] images.prune failed during cleanup: {e}",
-            file=sys.stderr,
-        )
-
-    builder_reclaimed = 0
-    try:
-        # prune_builds() is available on the low-level API client; not all
-        # daemon versions support it, so failures here are non-fatal.
-        r = client.api.prune_builds()
-        builder_reclaimed = int(r.get("SpaceReclaimed") or 0)
-    except (docker.errors.APIError, AttributeError) as e:
-        print(
-            f"[{revision_label}] builder cache prune skipped/failed: {e}",
-            file=sys.stderr,
-        )
-
-    print(
-        f"[{revision_label}] docker cleanup: removed_images={removed} "
-        f"failed_removals={failed} "
-        f"dangling_bytes_reclaimed={dangling_reclaimed} "
-        f"builder_bytes_reclaimed={builder_reclaimed}"
-    )
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 SRC_DIR = REPO_ROOT / "src"
