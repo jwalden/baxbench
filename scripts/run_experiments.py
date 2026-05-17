@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import traceback
 from typing import Any
 
@@ -35,15 +36,26 @@ def cleanup_baxbench_docker_images(revision_label: str) -> None:
     legacy builder cache. The next revision will re-pull base images on demand;
     on benchmark runs that take hours per revision the extra pull time is
     negligible compared to the disk-safety win.
+
+    No timeout is applied: when hundreds of images have accumulated, prune can
+    take many minutes, and a partial prune (caused by a timeout SIGKILL) leaves
+    most of the unused images behind and defeats the whole point. If the
+    daemon truly wedges the orchestrator will hang, which is preferable to
+    silently leaking disk into the next revision.
     """
     for argv in (
         ["docker", "system", "prune", "-af", "--volumes"],
         ["docker", "builder", "prune", "-af"],
     ):
         try:
-            r = subprocess.run(argv, capture_output=True, text=True, timeout=300)
+            t0 = time.monotonic()
+            r = subprocess.run(argv, capture_output=True, text=True)
+            elapsed = time.monotonic() - t0
             tail = (r.stdout or r.stderr or "").strip().splitlines()[-1:] or [""]
-            print(f"[{revision_label}] {' '.join(argv)} -> rc={r.returncode} {tail[0]}")
+            print(
+                f"[{revision_label}] {' '.join(argv)} -> rc={r.returncode} "
+                f"elapsed={elapsed:.1f}s {tail[0]}"
+            )
         except (subprocess.SubprocessError, FileNotFoundError) as e:
             print(
                 f"[{revision_label}] {' '.join(argv)} failed: {e}",
