@@ -77,6 +77,7 @@ class Prompter:
         "claude-sonnet-4-20250514": 64000,
         "claude-3-7-sonnet-20250219": 64000,
         "claude-opus-4-1-20250805": 32000,
+        "claude-opus-4-7": 32000,
     }
 
     vllm_context_lengths = {
@@ -102,6 +103,7 @@ class Prompter:
         "o3-2025-04-16": 100000,
         "o4-mini-2025-04-16": 100000,
         "gpt-5-2025-08-07": 128000,
+        "gpt-5.5-2026-04-23": 128000,
     }
 
     openrouter_remap = {
