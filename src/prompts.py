@@ -77,7 +77,7 @@ class Prompter:
         "claude-sonnet-4-20250514": 64000,
         "claude-3-7-sonnet-20250219": 64000,
         "claude-opus-4-1-20250805": 32000,
-        "claude-opus-4-7": 32000,
+        "claude-opus-4-7": 64000,  # new tokenizer ~1.35x, xhigh effort needs headroom
     }
 
     anthropic_adaptive_thinking_models = {
@@ -179,10 +179,40 @@ class Prompter:
                     "max_tokens": self.anthropic_thinking_lengths[self.model],
                 }
                 if self.model in self.anthropic_adaptive_thinking_models:
-                    stream_kwargs["thinking"] = {"type": "adaptive"}
-                    stream_kwargs["output_config"] = {
-                        "effort": self.reasoning_effort
+                    effort = (
+                        "high" if self.model == "claude-opus-4-7" else self.reasoning_effort
+                    )
+                    stream_kwargs["thinking"] = {
+                        "type": "adaptive",
+                        "display": "summarized",
                     }
+                    # output_config is not a known kwarg in older anthropic SDKs;
+                    # forward it via extra_body so the SDK merges it into the JSON body.
+                    stream_kwargs["extra_body"] = {
+                        "output_config": {"effort": effort},
+                    }
+                    # #region agent log
+                    try:
+                        import json as _dbg_json, time as _dbg_time
+                        with open("/home/prashant/Projects/research/baxbench-copy/.cursor/debug-5b4c87.log", "a") as _f:
+                            _f.write(_dbg_json.dumps({
+                                "sessionId": "5b4c87",
+                                "runId": "pre-fix",
+                                "hypothesisId": "H1+H2",
+                                "location": "src/prompts.py:adaptive_stream_kwargs",
+                                "message": "adaptive stream_kwargs about to be sent",
+                                "data": {
+                                    "model": stream_kwargs.get("model"),
+                                    "max_tokens": stream_kwargs.get("max_tokens"),
+                                    "thinking": stream_kwargs.get("thinking"),
+                                    "extra_body": stream_kwargs.get("extra_body"),
+                                    "kwarg_keys": sorted(stream_kwargs.keys()),
+                                },
+                                "timestamp": int(_dbg_time.time() * 1000),
+                            }) + "\n")
+                    except Exception:
+                        pass
+                    # #endregion
                 else:
                     stream_kwargs["thinking"] = {
                         "type": "enabled",
@@ -190,13 +220,52 @@ class Prompter:
                         - 1,
                     }
                 with client.messages.stream(**stream_kwargs) as stream:
+                    _dbg_first_event_logged = False
                     for event in stream:
+                        # #region agent log
+                        if not _dbg_first_event_logged:
+                            try:
+                                import json as _dbg_json, time as _dbg_time
+                                with open("/home/prashant/Projects/research/baxbench-copy/.cursor/debug-5b4c87.log", "a") as _f:
+                                    _f.write(_dbg_json.dumps({
+                                        "sessionId": "5b4c87",
+                                        "runId": "pre-fix",
+                                        "hypothesisId": "H3",
+                                        "location": "src/prompts.py:first_stream_event",
+                                        "message": "first event received from stream (API accepted request)",
+                                        "data": {"event_type": getattr(event, "type", None)},
+                                        "timestamp": int(_dbg_time.time() * 1000),
+                                    }) + "\n")
+                            except Exception:
+                                pass
+                            _dbg_first_event_logged = True
+                        # #endregion
                         if event.type == "content_block_delta":
                             if event.delta.type == "thinking_delta":
                                 thinking += event.delta.thinking
                             elif event.delta.type == "text_delta":
                                 text += event.delta.text
                 logger.info(f"Thinking traces:\n {thinking}")
+                # #region agent log
+                try:
+                    import json as _dbg_json, time as _dbg_time
+                    with open("/home/prashant/Projects/research/baxbench-copy/.cursor/debug-5b4c87.log", "a") as _f:
+                        _f.write(_dbg_json.dumps({
+                            "sessionId": "5b4c87",
+                            "runId": "pre-fix",
+                            "hypothesisId": "H3",
+                            "location": "src/prompts.py:stream_done",
+                            "message": "stream finished",
+                            "data": {
+                                "text_len": len(text),
+                                "thinking_len": len(thinking),
+                                "text_head": text[:200],
+                            },
+                            "timestamp": int(_dbg_time.time() * 1000),
+                        }) + "\n")
+                except Exception:
+                    pass
+                # #endregion
                 return [text]
             else:
                 response = client.messages.create(
@@ -217,6 +286,32 @@ class Prompter:
                 logger.warning(f"Completion was cut off due to length.")
             return [response.content[0].text]
         except Exception as e:
+            # #region agent log
+            try:
+                import json as _dbg_json, time as _dbg_time, traceback as _dbg_tb
+                body = None
+                try:
+                    body = getattr(getattr(e, "response", None), "text", None)
+                except Exception:
+                    body = None
+                with open("/home/prashant/Projects/research/baxbench-copy/.cursor/debug-5b4c87.log", "a") as _f:
+                    _f.write(_dbg_json.dumps({
+                        "sessionId": "5b4c87",
+                        "runId": "pre-fix",
+                        "hypothesisId": "H1+H4",
+                        "location": "src/prompts.py:prompt_anthropic_except",
+                        "message": "exception in prompt_anthropic",
+                        "data": {
+                            "exc_type": type(e).__name__,
+                            "exc_str": str(e)[:1000],
+                            "response_body": (body[:1000] if isinstance(body, str) else body),
+                            "traceback_tail": _dbg_tb.format_exc().splitlines()[-6:],
+                        },
+                        "timestamp": int(_dbg_time.time() * 1000),
+                    }) + "\n")
+            except Exception:
+                pass
+            # #endregion
             raise e
 
     @no_type_check
