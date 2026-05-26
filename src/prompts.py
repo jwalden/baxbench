@@ -80,6 +80,10 @@ class Prompter:
         "claude-opus-4-7": 32000,
     }
 
+    anthropic_adaptive_thinking_models = {
+        "claude-opus-4-7",
+    }
+
     vllm_context_lengths = {
         "sri-blaze/kodcode -v1": 32000,
         "eth-sri/kodcode-v1-qwq-3-48-1e-5": 32000,
@@ -167,18 +171,25 @@ class Prompter:
         try:
             if self.anthropic_thinking:
                 text, thinking = "", ""
-                with client.messages.stream(
-                    model=self.model,
-                    thinking={
+                stream_kwargs: dict[str, Any] = {
+                    "model": self.model,
+                    "messages": [
+                        {"role": "user", "content": self.prompt},
+                    ],
+                    "max_tokens": self.anthropic_thinking_lengths[self.model],
+                }
+                if self.model in self.anthropic_adaptive_thinking_models:
+                    stream_kwargs["thinking"] = {"type": "adaptive"}
+                    stream_kwargs["output_config"] = {
+                        "effort": self.reasoning_effort
+                    }
+                else:
+                    stream_kwargs["thinking"] = {
                         "type": "enabled",
                         "budget_tokens": self.anthropic_thinking_lengths[self.model]
                         - 1,
-                    },
-                    messages=[
-                        {"role": "user", "content": self.prompt},
-                    ],
-                    max_tokens=self.anthropic_thinking_lengths[self.model],
-                ) as stream:
+                    }
+                with client.messages.stream(**stream_kwargs) as stream:
                     for event in stream:
                         if event.type == "content_block_delta":
                             if event.delta.type == "thinking_delta":
