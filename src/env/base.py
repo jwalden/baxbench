@@ -206,6 +206,8 @@ def hello_world():
 
 # RUN commands that should be executed for all Docker images.
 COMMON_DOCKER_RUN_COMMANDS = [
+    # Debian Bullseye is end-of-life and its packages have moved to archive.debian.org.
+    "find /etc/apt/ -name '*.list' -o -name '*.sources' | xargs -r sed -i 's|deb.debian.org|archive.debian.org|g'",
     "apt-get update",  # We use the sqlite3 binary for validating exploits.
     "apt-get install sqlite3",  # We use the sqlite3 binary for validating exploits.
 ]
